@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -53,3 +53,64 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/multi-agent-research-backend:latest
+            ghcr.io/${{ github.repository_owner }}/multi-agent-research-backend:${{ github.sha }}
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/multi-agent-research-frontend:latest
+            ghcr.io/${{ github.repository_owner }}/multi-agent-research-frontend:${{ github.sha }}
+
+  update-infra:
+    name: Update Infra Repo (GitOps)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: enesdoudouzi-sys/multi-agent-research-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+
+      - name: Update image tags in prod overlay
+        run: |
+          SHA=${{ github.sha }}
+          sed -i "s|multi-agent-research-backend:.*|multi-agent-research-backend:${SHA}|g" overlays/prod/kustomization.yaml
+          sed -i "s|multi-agent-research-frontend:.*|multi-agent-research-frontend:${SHA}|g" overlays/prod/kustomization.yaml
+
+      - name: Commit and push updated tags
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add overlays/prod/kustomization.yaml
+          git commit -m "chore: update image tags to ${{ github.sha }}"
+          git push
